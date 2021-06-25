@@ -1,5 +1,6 @@
 idf_build_get_property(target IDF_TARGET)
-idf_component_register(REQUIRES esp_rom freertos vfs soc)
+idf_component_register(REQUIRES esp_rom freertos vfs soc
+                        PRIV_REQUIRES fatfs)
 
 if(CONFIG_USB_ENABLED)
 
@@ -31,6 +32,7 @@ if(CONFIG_USB_ENABLED)
       "${IDF_PATH}/components/tinyusb/tinyusb/src/device"
       # espressif:
       #"${COMPONENT_DIR}/additions/include_private"
+      "${IDF_PATH}/components/fatfs/src"
       )
 
   set(includes_public
@@ -69,6 +71,11 @@ if(CONFIG_USB_ENABLED)
   if(CONFIG_USB_HID_ENABLED)
     list(APPEND srcs
         "${COMPONENT_DIR}/additions/src/tusb_hid.c")
+  endif()
+
+  if(CONFIG_USB_MSC_ENABLED)
+    list(APPEND srcs
+        "${COMPONENT_DIR}/additions/src/tusb_msc.c")
   endif()
 
   ### tinyusb lib ###
