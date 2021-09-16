@@ -19,11 +19,11 @@
 #include "diskio.h"
 #include "tusb_msc.h"
 
-static uint8_t s_pdrv = 0;
-static int s_disk_block_size = 0;
-
 #define LOGICAL_DISK_NUM 1
-static bool ejected[LOGICAL_DISK_NUM] = {true};
+
+static uint8_t s_pdrv[LOGICAL_DISK_NUM] = {0,1};
+static int s_disk_block_size[LOGICAL_DISK_NUM] = {0,0};
+static bool s_ejected[LOGICAL_DISK_NUM] = {true};
 
 esp_err_t tusb_msc_init(const tinyusb_config_msc_t *cfg)
 {
@@ -31,11 +31,11 @@ esp_err_t tusb_msc_init(const tinyusb_config_msc_t *cfg)
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (cfg->pdrv > 0) {
+    if (cfg->pdrv >= LOGICAL_DISK_NUM) {
         return ESP_ERR_NOT_SUPPORTED;
     }
-
-    s_pdrv = cfg->pdrv;
+    s_pdrv[0] = cfg->pdrv;
+    //s_pdrv[1] = 1;
     return ESP_OK;
 }
 
@@ -49,7 +49,7 @@ void tud_mount_cb(void)
     // Reset the ejection tracking every time we're plugged into USB. This allows for us to battery
     // power the device, eject, unplug and plug it back in to get the drive.
     for (uint8_t i = 0; i < LOGICAL_DISK_NUM; i++) {
-        ejected[i] = false;
+        s_ejected[i] = false;
     }
 
     ESP_LOGI(__func__, "");
@@ -75,6 +75,12 @@ void tud_resume_cb(void)
     ESP_LOGW(__func__, "");
 }
 
+// Invoked to determine max LUN
+uint8_t tud_msc_get_maxlun_cb(void)
+{
+  return LOGICAL_DISK_NUM; // dual LUN
+}
+
 // Callback invoked when WRITE10 command is completed (status received and accepted by host).
 // used to flush any pending cache.
 void tud_msc_write10_complete_cb(uint8_t lun)
@@ -93,7 +99,7 @@ static bool _logical_disk_ejected(void)
     bool all_ejected = true;
 
     for (uint8_t i = 0; i < LOGICAL_DISK_NUM; i++) {
-        all_ejected &= ejected[i];
+        all_ejected &= s_ejected[i];
     }
 
     return all_ejected;
@@ -150,10 +156,10 @@ void tud_msc_capacity_cb(uint8_t lun, uint32_t *block_count, uint16_t *block_siz
         return;
     }
 
-    disk_ioctl(s_pdrv, GET_SECTOR_COUNT, block_count);
-    disk_ioctl(s_pdrv, GET_SECTOR_SIZE, block_size);
-    s_disk_block_size = *block_size;
-    ESP_LOGD(__func__, "GET_SECTOR_COUNT = %d，GET_SECTOR_SIZE = %d", *block_count, *block_size);
+    disk_ioctl(s_pdrv[lun], GET_SECTOR_COUNT, block_count);
+    disk_ioctl(s_pdrv[lun], GET_SECTOR_SIZE, block_size);
+    s_disk_block_size[lun] = *block_size;
+    ESP_LOGD(__func__, "lun = %u GET_SECTOR_COUNT = %d，GET_SECTOR_SIZE = %d",lun, *block_count, *block_size);
 }
 
 bool tud_msc_is_writable_cb(uint8_t lun)
@@ -184,19 +190,19 @@ bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool start, boo
     if (load_eject) {
         if (!start) {
             // Eject but first flush.
-            if (disk_ioctl(s_pdrv, CTRL_SYNC, NULL) != RES_OK) {
+            if (disk_ioctl(s_pdrv[lun], CTRL_SYNC, NULL) != RES_OK) {
                 return false;
             } else {
-                ejected[lun] = true;
+                s_ejected[lun] = true;
             }
         } else {
             // We can only load if it hasn't been ejected.
-            return !ejected[lun];
+            return !s_ejected[lun];
         }
     } else {
         if (!start) {
             // Stop the unit but don't eject.
-            if (disk_ioctl(s_pdrv, CTRL_SYNC, NULL) != RES_OK) {
+            if (disk_ioctl(s_pdrv[lun], CTRL_SYNC, NULL) != RES_OK) {
                 return false;
             }
         }
@@ -218,9 +224,9 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void *buff
         return 0;
     }
 
-    const uint32_t block_count = bufsize / s_disk_block_size;
-    disk_read(s_pdrv, buffer, lba, block_count);
-    return block_count * s_disk_block_size;
+    const uint32_t block_count = bufsize / s_disk_block_size[lun];
+    disk_read(s_pdrv[lun], buffer, lba, block_count);
+    return block_count * s_disk_block_size[lun];
 }
 
 // Callback invoked when received WRITE10 command.
@@ -235,9 +241,9 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t *
         return 0;
     }
 
-    const uint32_t block_count = bufsize / s_disk_block_size;
-    disk_write(s_pdrv, buffer, lba, block_count);
-    return block_count * s_disk_block_size;
+    const uint32_t block_count = bufsize / s_disk_block_size[lun];
+    disk_write(s_pdrv[lun], buffer, lba, block_count);
+    return block_count * s_disk_block_size[lun];
 }
 
 // Callback invoked when received an SCSI command not in built-in list below
@@ -264,6 +270,17 @@ int32_t tud_msc_scsi_cb(uint8_t lun, uint8_t const scsi_cmd[16], void *buffer, u
             // Host is about to read/write etc ... better not to disconnect disk
             resplen = 0;
             break;
+
+        case SCSI_CMD_START_STOP_UNIT:
+        // Host try to eject/safe remove/poweroff us. We could safely disconnect with disk storage, or go into lower power
+        /* scsi_start_stop_unit_t const * start_stop = (scsi_start_stop_unit_t const *) scsi_cmd;
+            // Start bit = 0 : low power mode, if load_eject = 1 : unmount disk storage as well
+            // Start bit = 1 : Ready mode, if load_eject = 1 : mount disk storage
+            start_stop->start;
+            start_stop->load_eject;
+        */
+        resplen = 0;
+        break;
 
         default:
             // Set Sense = Invalid Command Operation
