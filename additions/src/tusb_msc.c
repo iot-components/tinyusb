@@ -18,11 +18,14 @@
 #include "ff.h"
 #include "diskio.h"
 #include "tusb_msc.h"
+#include "esp_attr.h"
 
 #define LOGICAL_DISK_NUM 1
 
-static uint8_t s_pdrv[LOGICAL_DISK_NUM] = {0,1};
-static int s_disk_block_size[LOGICAL_DISK_NUM] = {0,0};
+static uint8_t s_pdrv[LOGICAL_DISK_NUM] = {0};
+static tusb_msc_callback_t cb_mount[LOGICAL_DISK_NUM] = {NULL};
+static tusb_msc_callback_t cb_unmount[LOGICAL_DISK_NUM] = {NULL};
+static int s_disk_block_size[LOGICAL_DISK_NUM] = {0};
 static bool s_ejected[LOGICAL_DISK_NUM] = {true};
 
 esp_err_t tusb_msc_init(const tinyusb_config_msc_t *cfg)
@@ -31,9 +34,8 @@ esp_err_t tusb_msc_init(const tinyusb_config_msc_t *cfg)
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (cfg->pdrv >= LOGICAL_DISK_NUM) {
-        return ESP_ERR_NOT_SUPPORTED;
-    }
+    cb_mount[0] = cfg->cb_mount;
+    cb_unmount[0] = cfg->cb_unmount;
     s_pdrv[0] = cfg->pdrv;
     //s_pdrv[1] = 1;
     return ESP_OK;
@@ -52,12 +54,22 @@ void tud_mount_cb(void)
         s_ejected[i] = false;
     }
 
+    if (cb_mount[0])
+    {
+        cb_mount[0](0, NULL);
+    }
+    
     ESP_LOGI(__func__, "");
 }
 
 // Invoked when device is unmounted
 void tud_umount_cb(void)
 {
+    if (cb_unmount[0])
+    {
+        cb_unmount[0](0, NULL);
+    }
+
     ESP_LOGW(__func__, "");
 }
 
@@ -66,6 +78,10 @@ void tud_umount_cb(void)
 // USB Specs: Within 7ms, device must draw an average current less than 2.5 mA from bus
 void tud_suspend_cb(bool remote_wakeup_en)
 {
+    if (cb_unmount[0])
+    {
+        cb_unmount[0](0, NULL);
+    }
     ESP_LOGW(__func__, "");
 }
 
@@ -85,7 +101,7 @@ uint8_t tud_msc_get_maxlun_cb(void)
 // used to flush any pending cache.
 void tud_msc_write10_complete_cb(uint8_t lun)
 {
-    if (lun >= LOGICAL_DISK_NUM) {
+    if (unlikely(lun >= LOGICAL_DISK_NUM)) {
         ESP_LOGE(__func__, "invalid lun number %u", lun);
         return;
     }
@@ -111,7 +127,7 @@ void tud_msc_inquiry_cb(uint8_t lun, uint8_t vendor_id[8], uint8_t product_id[16
 {
     ESP_LOGD(__func__, "");
 
-    if (lun >= LOGICAL_DISK_NUM) {
+    if (unlikely(lun >= LOGICAL_DISK_NUM)) {
         ESP_LOGE(__func__, "invalid lun number %u", lun);
         return;
     }
@@ -131,7 +147,7 @@ bool tud_msc_test_unit_ready_cb(uint8_t lun)
 {
     ESP_LOGD(__func__, "");
 
-    if (lun >= LOGICAL_DISK_NUM) {
+    if (unlikely(lun >= LOGICAL_DISK_NUM)) {
         ESP_LOGE(__func__, "invalid lun number %u", lun);
         return false;
     }
@@ -151,7 +167,7 @@ void tud_msc_capacity_cb(uint8_t lun, uint32_t *block_count, uint16_t *block_siz
 {
     ESP_LOGD(__func__, "");
 
-    if (lun >= LOGICAL_DISK_NUM) {
+    if (unlikely(lun >= LOGICAL_DISK_NUM)) {
         ESP_LOGE(__func__, "invalid lun number %u", lun);
         return;
     }
@@ -166,7 +182,7 @@ bool tud_msc_is_writable_cb(uint8_t lun)
 {
     ESP_LOGD(__func__, "");
 
-    if (lun >= LOGICAL_DISK_NUM) {
+    if (unlikely(lun >= LOGICAL_DISK_NUM)) {
         ESP_LOGE(__func__, "invalid lun number %u", lun);
         return false;
     }
@@ -182,7 +198,7 @@ bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool start, boo
     ESP_LOGI(__func__, "");
     (void) power_condition;
 
-    if (lun >= LOGICAL_DISK_NUM) {
+    if (unlikely(lun >= LOGICAL_DISK_NUM)) {
         ESP_LOGE(__func__, "invalid lun number %u", lun);
         return false;
     }
@@ -215,11 +231,11 @@ bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool start, boo
 
 // Callback invoked when received READ10 command.
 // Copy disk's data to buffer (up to bufsize) and return number of copied bytes.
-int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void *buffer, uint32_t bufsize)
+IRAM_ATTR int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void *buffer, uint32_t bufsize)
 {
     ESP_LOGD(__func__, "");
 
-    if (lun >= LOGICAL_DISK_NUM) {
+    if (unlikely(lun >= LOGICAL_DISK_NUM)) {
         ESP_LOGE(__func__, "invalid lun number %u", lun);
         return 0;
     }
@@ -231,12 +247,12 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void *buff
 
 // Callback invoked when received WRITE10 command.
 // Process data in buffer to disk's storage and return number of written bytes
-int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t *buffer, uint32_t bufsize)
+IRAM_ATTR int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t *buffer, uint32_t bufsize)
 {
     ESP_LOGD(__func__, "");
     (void) offset;
 
-    if (lun >= LOGICAL_DISK_NUM) {
+    if (unlikely(lun >= LOGICAL_DISK_NUM)) {
         ESP_LOGE(__func__, "invalid lun number %u", lun);
         return 0;
     }
@@ -254,7 +270,7 @@ int32_t tud_msc_scsi_cb(uint8_t lun, uint8_t const scsi_cmd[16], void *buffer, u
     // read10 & write10 has their own callback and MUST not be handled here
     ESP_LOGD(__func__, "");
 
-    if (lun >= LOGICAL_DISK_NUM) {
+    if (unlikely(lun >= LOGICAL_DISK_NUM)) {
         ESP_LOGE(__func__, "invalid lun number %u", lun);
         return 0;
     }

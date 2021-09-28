@@ -22,11 +22,15 @@ extern "C" {
 #include "tusb.h"
 #include "tinyusb.h"
 
+typedef void(*tusb_msc_callback_t)(int pdrv, void *arg);
+
 /**
  * @brief Configuration structure for MSC
  */
 typedef struct {
     uint8_t pdrv;             /* Physical drive nmuber (0..) */
+    tusb_msc_callback_t cb_mount;
+    tusb_msc_callback_t cb_unmount;
 } tinyusb_config_msc_t;
 
 /**
